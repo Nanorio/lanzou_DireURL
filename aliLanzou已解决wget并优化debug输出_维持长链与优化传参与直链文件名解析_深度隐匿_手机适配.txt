@@ -1,0 +1,460 @@
+/**
+ * ========== 阿里云ESA边缘计算-函数部署(蓝奏云代理-隐匿版V5.2)==========
+ *
+ * 【 终极使用说明书 (内部绝密版) 】
+ * 本节点采用纯 URL 参数 (Query String) 智能解析模式，支持双轨文件命名，
+ * 并自带针对直接访问的 Nginx 404 深度伪装。
+ * * 👉 核心参数说明：
+ * ?url=   (必填) 蓝奏云分享页完整链接
+ * &pwd=   (可选) 文件的提取码/密码（无密码则不填）
+ * &name=  (可选) 强行指定下载时的文件名（服务端重写 Content-Disposition）
+ * &debug= (可选) 传入 =1 开启炫酷的暗黑风全链路追踪与调试面板
+ * * 👉 终端与浏览器实战用例 (基于测试链接)：
+ * * 1. [ 自动提取真实文件名 ] (依赖 wget 的响应头识别)
+ * wget --content-disposition "https://lanzou.nanoric.xyz/?url=https://wwarg.lanzn.com/iyJTu3mklfli"
+ * * 2. [ 强制自定义文件名 ] (极致免参 wget，推荐用于自动化脚本)
+ * wget "https://lanzou.nanoric.xyz/?url=https://wwarg.lanzn.com/iyJTu3mklfli&pwd=如有密码填这里&name=MyTestFile.zip"
+ * * 3. [ 浏览器全链路监控 ] (可视化查看真实直链、文件大小、代理流状态)
+ * https://lanzou.nanoric.xyz/?url=https://wwarg.lanzn.com/iyJTu3mklfli&pwd=如有密码填这里&debug=1
+ * * =========================================================================
+ * * 4. [ 真实测试站点 ]
+ * https://lanzou.nanoric.xyz/?url=https://wwarg.lanzn.com/iyJTu3mklfli
+ * https://lanzou.nanoric.xyz/?url=https://wwarg.lanzn.com/iyJTu3mklfli&pwd=&debug=1
+ * 
+ */
+
+function solveAliyunWaf(arg1) {
+    let m = [15, 35, 29, 24, 33, 16, 1, 38, 10, 9, 19, 31, 40, 27, 22, 23, 25, 13, 6, 11, 39, 18, 20, 8, 14, 21, 32, 26, 2, 30, 7, 4, 17, 5, 3, 28, 34, 37, 12, 36];
+    let q = new Array(40).fill('');
+    for (let i = 0; i < Math.min(arg1.length, 40); i++) {
+        for (let j = 0; j < m.length; j++) {
+            if (m[j] === i + 1) q[j] = arg1[i];
+        }
+    }
+    let u = q.join('');
+    let p = "3000176000856006061501533003690027800375";
+    let v = "";
+    for (let i = 0; i < Math.min(u.length, p.length); i += 2) {
+        let xorVal = parseInt(u.substring(i, i + 2), 16) ^ parseInt(p.substring(i, i + 2), 16);
+        let hexVal = xorVal.toString(16);
+        if (hexVal.length === 1) hexVal = '0' + hexVal;
+        v += hexVal;
+    }
+    return v;
+}
+
+function fetchWithTimeout(url, options, timeout = 15000) {
+    return Promise.race([
+        fetch(url, options),
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`请求超时: ${url}`)), timeout))
+    ]);
+}
+
+function mergeCookies(resp, existing = "") {
+    const setCookie = resp.headers.get("set-cookie");
+    if (!setCookie) return existing;
+    const cookies = setCookie.split(',').map(c => c.split(';')[0].trim()).filter(c => c.includes('='));
+    const map = new Map();
+    if (existing) existing.split(';').forEach(pair => { let [k, v] = pair.trim().split('='); if (k && v) map.set(k, v); });
+    cookies.forEach(c => { let [k, v] = c.split('='); if (k && v) map.set(k, v); });
+    return Array.from(map.entries()).map(([k, v]) => `${k}=${v}`).join('; ');
+}
+
+function removePort(urlStr) {
+    try {
+        let u = new URL(urlStr);
+        u.port = ''; 
+        return u.href;
+    } catch (e) {
+        return urlStr;
+    }
+}
+
+// 提取蓝奏云真实文件名
+function extractFileNameFromHtml(html) {
+    const patterns = [
+        /<div[^>]*class="[^"]*fileinfo[^"]*"[^>]*>([^<]+)</i,
+        /<div[^>]*class="[^"]*filename[^"]*"[^>]*>([^<]+)</i,
+        /id="[^"]*filename[^"]*"[^>]*>([^<]+)</i,
+        /<title>([^<]+)\s*-[\s\S]*<\/title>/i, 
+        /<title>([^<]+)<\/title>/i
+    ];
+    for (let p of patterns) {
+        let m = html.match(p);
+        if (m && m[1] && !m[1].includes('http') && m[1].length < 100) {
+            let name = m[1].trim().replace(/^\s*文件名\s*[：:]\s*/, '');
+            if (name) return name;
+        }
+    }
+    return "";
+}
+
+async function fetchRealStream(urlToFetch, headers, maxRedirects = 3) {
+    let currentUrl = removePort(urlToFetch);
+    for (let i = 0; i < maxRedirects; i++) {
+        let resp = await fetchWithTimeout(currentUrl, { headers: headers, redirect: "manual" }, 30000);
+        if ([301, 302, 303, 307, 308].includes(resp.status)) {
+            let loc = resp.headers.get("Location");
+            if (loc) {
+                currentUrl = loc.startsWith('http') ? loc : new URL(loc, currentUrl).href;
+                currentUrl = removePort(currentUrl); 
+                headers = { "User-Agent": headers["User-Agent"], "Accept": "*/*" }; 
+                continue;
+            }
+        }
+        return { resp, finalUrl: currentUrl };
+    }
+    throw new Error("重定向次数过多");
+}
+
+async function handleRequest(request) {
+    const url = new URL(request.url);
+    const debug = url.searchParams.get("debug") === "1";
+    
+    // === 核心：纯享参数解析 ===
+    let targetUrl = url.searchParams.get("url");
+    let pwd = url.searchParams.get("pwd") || "";
+    let customFileName = url.searchParams.get("name") || ""; 
+
+    if (targetUrl && !targetUrl.startsWith('http')) {
+        targetUrl = 'https://' + targetUrl; // 容错处理
+    }
+
+    // === 深度伪装：遮天蔽日 ===
+    if (!targetUrl) {
+        // 返回一个原汁原味的 Nginx 404 错误页，连 Favicon 都是透明的
+        let fake404 = `<html>\r\n<head><title>404 Not Found</title><link rel="icon" href="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7"></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>`;
+        return new Response(fake404, { status: 404, headers: {"Content-Type": "text/html"} });
+    }
+
+    let debugLogs = [];
+    const log = (step, detail) => { 
+        const time = new Date().toISOString().split('T')[1].substring(0, 12);
+        debugLogs.push(`<div class="log-line"><span class="time">[ UTC+0 ] [${time}]</span> <span class="step">[${step}]</span> <span class="detail">${detail}</span></div>`); 
+    };
+
+    try {
+        const domainMatch = targetUrl.match(/https?:\/\/([^\/]+)/);
+        if (!domainMatch) throw new Error("目标链接域名解析失败");
+        const domain = domainMatch[1];
+        log("系统就绪", `目标链接: <a href="${targetUrl}" style="color:#7ee787;" target="_blank">${targetUrl}</a> | 密码: ${pwd || "无"}`);
+
+        let reqHeaders = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36", "Accept-Language": "zh-CN,zh;q=0.9" };
+        let cookieStr = "";
+
+        log("解析器", "请求蓝奏云主页...");
+        let resp1 = await fetchWithTimeout(targetUrl, { headers: reqHeaders });
+        cookieStr = mergeCookies(resp1, cookieStr);
+        let html = await resp1.text();
+
+        const arg1Match = html.match(/var\s+arg1\s*=\s*'([A-F0-9]+)'/);
+        if (arg1Match) {
+            log("WAF拦截", "命中防护，计算 ACW 凭证...");
+            let acw = solveAliyunWaf(arg1Match[1]);
+            cookieStr = mergeCookies(resp1, `acw_sc__v2=${acw}`);
+            reqHeaders["Cookie"] = cookieStr;
+            resp1 = await fetchWithTimeout(targetUrl, { headers: reqHeaders });
+            html = await resp1.text();
+        }
+
+        let targetHtml = html, refererUrl = targetUrl;
+        
+        let htmlExtractedFileName = extractFileNameFromHtml(targetHtml);
+
+        let ajaxUrl = [...targetHtml.matchAll(/url\s*:\s*['"](\/?ajaxm\.php[^'"]+)['"]/g)].map(m => m[1]).filter(u => !u.endsWith('file=1')).pop();
+        if (!ajaxUrl) {
+            let iframeMatch = html.match(/<iframe.*?src="([^"]+)".*?><\/iframe>/);
+            if (iframeMatch) {
+                log("解析器", "穿透 iframe 嵌套页...");
+                let resp2 = await fetchWithTimeout(`https://${domain}${iframeMatch[1]}`, { headers: reqHeaders });
+                targetHtml = await resp2.text();
+                refererUrl = `https://${domain}${iframeMatch[1]}`;
+                ajaxUrl = [...targetHtml.matchAll(/url\s*:\s*['"](\/?ajaxm\.php[^'"]+)['"]/g)].map(m => m[1]).filter(u => !u.endsWith('file=1')).pop();
+                
+                let iframeExtracted = extractFileNameFromHtml(targetHtml);
+                if (iframeExtracted) htmlExtractedFileName = iframeExtracted;
+            }
+        }
+        if (!ajaxUrl) throw new Error("未找到底层 API 接口");
+        if (!ajaxUrl.startsWith('/')) ajaxUrl = '/' + ajaxUrl;
+
+        let signVal = [...targetHtml.matchAll(/'sign'\s*:\s*['"]([^'"]+)['"]/g)].map(m => m[1]).filter(s => s.length > 20).pop();
+        if (!signVal) {
+            let varMatch = targetHtml.match(/'sign'\s*:\s*([a-zA-Z0-9_]+)/);
+            if (varMatch) {
+                let signVar = varMatch[1];
+                let valMatch = targetHtml.match(new RegExp(`var\\s+${signVar}\\s*=\\s*['"]([^'"]+)['"]`));
+                if (valMatch) signVal = valMatch[1];
+            }
+        }
+        if (!signVal) throw new Error("Sign提取失败");
+
+        log("解析器", "发起 POST 获取初始直链...");
+        let formData = new URLSearchParams({ 'action': 'downprocess', 'sign': signVal, 'p': pwd, 'kd': '1', 'ves': '1' });
+        let postHeaders = { ...reqHeaders, 'Origin': `https://${domain}`, 'Referer': refererUrl, 'Content-Type': 'application/x-www-form-urlencoded' };
+        
+        let resp3 = await fetchWithTimeout(`https://${domain}${ajaxUrl}`, { method: 'POST', headers: postHeaders, body: formData });
+        let resJson = await resp3.json();
+        if (resJson.zt !== 1) throw new Error(`直链获取失败: ${resJson.inf}`);
+        
+        let fullUrl = resJson.dom + "/file/" + resJson.url;
+        log("解析成功", `获得 CDN 入口节点`);
+
+        log("代理模块", "开始拉取文件流，检查风控状态...");
+        let { resp: streamResp, finalUrl: streamUrl } = await fetchRealStream(fullUrl, reqHeaders);
+        let contentType = streamResp.headers.get("Content-Type") || "";
+
+        if (contentType.includes("text/html")) {
+            let htmlBody = await streamResp.text();
+            if (htmlBody.includes("ajax.php") && htmlBody.includes("'file'")) {
+                log("触发风控", "拦截到异常校验页，执行全自动绕过...");
+                let fileMatch = htmlBody.match(/'file'\s*:\s*'([^']+)'/);
+                let signMatch = htmlBody.match(/'sign'\s*:\s*'([^']+)'/);
+                
+                if (fileMatch && signMatch) {
+                    let bypassForm = new URLSearchParams({ 'file': fileMatch[1], 'el': '2', 'sign': signMatch[1] });
+                    let bypassHeaders = { "User-Agent": reqHeaders["User-Agent"], "Referer": streamUrl, "Content-Type": "application/x-www-form-urlencoded" };
+                    let bypassUrl = new URL('ajax.php', streamUrl).href;
+                    
+                    let bResp = await fetchWithTimeout(bypassUrl, { method: 'POST', headers: bypassHeaders, body: bypassForm });
+                    let bJson = await bResp.json();
+                    
+                    if (bJson.zt == 1 || bJson.zt == '1') {
+                        let realUrl = bJson.url.startsWith('http') ? bJson.url : new URL(bJson.url, streamUrl).href;
+                        realUrl = removePort(realUrl); 
+                        log("绕过成功", `获得最终真实直链`);
+                        
+                        let realResult = await fetchRealStream(realUrl, reqHeaders);
+                        streamResp = realResult.resp;
+                        streamUrl = realResult.finalUrl; 
+                        contentType = streamResp.headers.get("Content-Type") || "";
+                        if (contentType.includes("text/html")) throw new Error("二次绕过后仍被防盗链拦截");
+                    } else throw new Error(`自动验证失败: ${JSON.stringify(bJson)}`);
+                } else throw new Error("验证页面缺少特征参数");
+            } else throw new Error("遭遇未知格式的HTML拦截页");
+        }
+
+        log("通道建立", `文件流已就绪 [Status: ${streamResp.status}]`);
+
+        // === 核心逻辑：智能提取真实文件名 ===
+        let finalOutputName = customFileName;
+        let isAutoExtracted = false;
+
+        if (!finalOutputName) {
+            isAutoExtracted = true;
+            let fnMatch = streamUrl.match(/[?&](?:fn|fileName)=([^&]+)/i);
+            if (fnMatch) {
+                try { finalOutputName = decodeURIComponent(fnMatch[1]); } catch(e) {}
+            }
+            if (!finalOutputName && htmlExtractedFileName) {
+                finalOutputName = htmlExtractedFileName;
+            }
+            if (!finalOutputName) finalOutputName = "downloaded_file.zip";
+        }
+
+        // ================= Debug 追踪面板 =================
+        if (debug) {
+            // 提取并转换文件大小
+            let contentLength = streamResp.headers.get("Content-Length");
+            let fileSizeDisplay = "未知大小 (可能为动态切片流)";
+            if (contentLength) {
+                let bytes = parseInt(contentLength, 10);
+                if (bytes >= 1073741824) fileSizeDisplay = (bytes / 1073741824).toFixed(2) + " GB";
+                else if (bytes >= 1048576) fileSizeDisplay = (bytes / 1048576).toFixed(2) + " MB";
+                else if (bytes >= 1024) fileSizeDisplay = (bytes / 1024).toFixed(2) + " KB";
+                else fileSizeDisplay = bytes + " B";
+            }
+
+            let downloadUrl = request.url.replace(/([?&])debug=1&?/, '$1').replace(/[?&]$/, '');
+            let animatedLogs = debugLogs.map((logStr, index) => {
+                return logStr.replace('class="log-line"', `class="log-line" style="animation-delay: ${index * 0.08}s;"`);
+            }).join('');
+
+            let htmlLog = `<!DOCTYPE html><html><head><meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+            <title>ESA Edge Proxy Monitor</title>
+            <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔗</text></svg>">
+            <style>
+                * { box-sizing: border-box; }
+                body { font-family: 'Consolas', 'Courier New', monospace; background: #0d1117; color: #c9d1d9; padding: 20px 40px; max-width: 1000px; margin: 0 auto; line-height: 1.6; }
+                h2 { color: #58a6ff; display: flex; align-items: center; border-bottom: 1px solid #30363d; padding-bottom: 15px; }
+                .pulse { width: 12px; height: 12px; background: #2ea043; border-radius: 50%; display: inline-block; margin-right: 15px; box-shadow: 0 0 10px #2ea043; animation: blink 1.5s infinite; flex-shrink: 0; }
+                @keyframes blink { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+                .card { background: #161b22; border: 1px solid #30363d; border-radius: 8px; padding: 20px; margin-bottom: 20px; box-shadow: 0 4px 20px rgba(0,0,0,0.5); }
+                .info-row { margin-bottom: 12px; }
+                .label { color: #8b949e; font-weight: bold; margin-right: 10px; user-select: none; }
+                .value { color: #a5d6ff; word-break: break-all; }
+                .tag { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #1f6feb; color: #fff; margin-left: 8px; vertical-align: text-bottom;}
+                
+                .link-container { position: relative; margin-top: 5px; display: flex; align-items: stretch; }
+                .link-box { flex-grow: 1; background: #010409; padding: 10px 12px; border: 1px solid #30363d; border-right: none; border-radius: 6px 0 0 6px; color: #ff7b72; font-size: 13px; word-break: break-all; overflow-x: auto; }
+                .copy-btn { background: #21262d; color: #c9d1d9; border: 1px solid #30363d; padding: 0 15px; border-radius: 0 6px 6px 0; cursor: pointer; font-weight: bold; transition: all 0.2s; white-space: nowrap; }
+                .copy-btn:hover { background: #30363d; border-color: #8b949e; color: #fff; }
+                .copy-btn.copied { background: #2ea043; border-color: #2ea043; color: #fff; }
+                
+                .btn-group { margin-top: 15px; }
+                .btn { display: inline-flex; justify-content: center; align-items: center; background: #238636; color: #ffffff; text-decoration: none; padding: 10px 20px; border-radius: 6px; font-weight: bold; transition: all 0.2s; border: 1px solid rgba(240,246,252,0.1); margin-right: 10px; cursor: pointer; }
+                .btn:hover { background: #2ea043; transform: translateY(-2px); box-shadow: 0 4px 12px rgba(46,160,67,0.4); }
+                .btn:active { transform: translateY(0); }
+                .btn-danger { background: #da3633; }
+                .btn-danger:hover { background: #f85149; box-shadow: 0 4px 12px rgba(248,81,73,0.4); }
+                
+                .logs-container { background: #010409; padding: 20px; border-radius: 8px; border: 1px solid #30363d; font-size: 13.5px; box-shadow: inset 0 2px 10px rgba(0,0,0,0.5); }
+                .log-line { opacity: 0; animation: fadeUp 0.4s forwards ease-out; margin-bottom: 6px; }
+                .time { color: #8b949e; }
+                .step { color: #d2a8ff; font-weight: bold; margin: 0 8px; }
+                .detail { color: #7ee787; }
+                @keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+
+                /* === 移动端响应式适配 === */
+                @media (max-width: 768px) {
+                    body { padding: 15px 12px; }
+                    h2 { font-size: 1.2em; }
+                    .card { padding: 15px; }
+                    .info-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 15px; }
+                    .label { margin-right: 0; border-bottom: 1px solid #30363d; padding-bottom: 4px; display: inline-block; width: max-content; }
+                    .link-container { flex-direction: column; }
+                    .link-box { border-radius: 6px 6px 0 0; border-right: 1px solid #30363d; border-bottom: none; }
+                    .copy-btn { border-radius: 0 0 6px 6px; padding: 12px; width: 100%; }
+                    .btn-group { display: flex; flex-direction: column; gap: 10px; margin-top: 20px; }
+                    .btn { margin-right: 0; width: 100%; }
+                }
+            </style>
+            </head>
+            <body>
+                <h2><span class="pulse"></span>全链路测试通过 (代理流就绪)</h2>
+                
+                <div class="card">
+                    <div class="info-row">
+                        <span class="label">🎯解析文件名:</span> 
+                        <span class="value">${finalOutputName} ${isAutoExtracted ? '<span class="tag">动态智能提取</span>' : '<span class="tag" style="background:#238636;">参数 name 指定</span>'}</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="label">📦文件总大小:</span> 
+                        <span class="value" style="color:#d2a8ff;">${fileSizeDisplay}</span>
+                    </div>
+                    <div class="info-row"><span class="label">🛡️代理服务器:</span> <span class="value" style="color:#2ea043;">防护穿透完毕 / 端口映射正常</span></div>
+                    <div class="info-row">
+                        <span class="label">🔗底层真实直链 (CDN Node):</span>
+                        <div class="link-container">
+                            <div class="link-box" id="rawLink">${streamUrl}</div>
+                            <button class="copy-btn" onclick="copyLink(this)">复制直链</button>
+                        </div>
+                    </div>
+                    <div class="btn-group">
+                        <a href="${downloadUrl}" class="btn btn-danger" title="流量经过ESA,适合脚本与脚本关联资源的下载">⚠️ 代理下载[CLI推荐]</a>
+                        <a href="${streamUrl}" class="btn" target="_blank" title="浏览器推荐使用该方式,流量不经过ESA">🚀 直链下载[浏览器推荐]</a>
+                    </div>
+                </div>
+
+                <h3 style="color:#8b949e; font-size: 15px; border-bottom: 1px dashed #30363d; padding-bottom: 10px;">>_ 运行日志追踪</h3>
+                <div class="logs-container">
+                    ${animatedLogs}
+                </div>
+
+                <script>
+                    function copyLink(btn) {
+                        const linkText = document.getElementById('rawLink').innerText;
+                        
+                        const showSuccess = () => {
+                            const originalText = btn.innerText;
+                            btn.innerText = '✔ 已复制';
+                            btn.classList.add('copied');
+                            setTimeout(() => {
+                                btn.innerText = originalText;
+                                btn.classList.remove('copied');
+                            }, 2000);
+                        };
+
+                        const showError = (err) => {
+                            alert('复制失败，请手动选中复制 (' + (err || '当前环境不支持') + ')');
+                        };
+
+                        // 兼容性降级策略：优先尝试现代 Clipboard API，如果报错或不存在则退化为 execCommand 方案
+                        if (navigator.clipboard && window.isSecureContext) {
+                            navigator.clipboard.writeText(linkText).then(showSuccess).catch(err => {
+                                fallbackCopy(linkText, showSuccess, showError);
+                            });
+                        } else {
+                            fallbackCopy(linkText, showSuccess, showError);
+                        }
+                    }
+
+                    // 传统 DOM 复制方案 (完美兼容移动端 WebView 与老旧浏览器)
+                    function fallbackCopy(text, onSuccess, onError) {
+                        try {
+                            var textArea = document.createElement("textarea");
+                            textArea.value = text;
+                            // 防止唤起虚拟键盘或页面滚动
+                            textArea.style.top = "0";
+                            textArea.style.left = "0";
+                            textArea.style.position = "fixed";
+                            document.body.appendChild(textArea);
+                            textArea.focus();
+                            textArea.select();
+                            var successful = document.execCommand('copy');
+                            document.body.removeChild(textArea);
+                            if (successful) {
+                                onSuccess();
+                            } else {
+                                onError('execCommand failed');
+                            }
+                        } catch (err) {
+                            onError(err);
+                        }
+                    }
+                </script>
+            </body></html>`;
+            return new Response(htmlLog, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+        }
+
+        let newHeaders = new Headers();
+        newHeaders.set("Content-Type", contentType);
+        newHeaders.delete("Content-Encoding");
+        
+        let encoded = encodeURIComponent(finalOutputName).replace(/[!'()*]/g, c => '%' + c.charCodeAt(0).toString(16));
+        newHeaders.set("Content-Disposition", `attachment; filename*=UTF-8''${encoded}; filename="${encoded}"`);
+        
+        if (streamResp.headers.has("Accept-Ranges")) newHeaders.set("Accept-Ranges", streamResp.headers.get("Accept-Ranges"));
+        if (streamResp.headers.has("Content-Length")) newHeaders.set("Content-Length", streamResp.headers.get("Content-Length"));
+
+        return new Response(streamResp.body, { status: 200, headers: newHeaders });
+
+    } catch (err) {
+        log("发生异常", err.message);
+        if (debug) {
+            let errorLogs = debugLogs.map((logStr, index) => logStr.replace('class="log-line"', `class="log-line" style="animation-delay: ${index * 0.08}s;"`)).join('');
+            return new Response(`<!DOCTYPE html><html><head><meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+            <title>ESA Edge Proxy - Error</title>
+            <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>❌</text></svg>">
+            <style>
+                * { box-sizing: border-box; }
+                body { font-family: monospace; background: #0d1117; color: #c9d1d9; padding: 40px; margin: 0; }
+                .card { background: #161b22; border: 1px solid #f85149; border-radius: 8px; padding: 20px; box-shadow: 0 0 15px rgba(248,81,73,0.2); max-width: 1000px; margin: 0 auto; }
+                h2 { color: #f85149; margin-top: 0; }
+                .logs-container { background: #010409; padding: 20px; border-radius: 8px; border: 1px solid #30363d; margin-top: 20px; overflow-x: auto; }
+                .log-line { opacity: 0; animation: fadeUp 0.4s forwards ease-out; margin-bottom: 6px; word-break: break-all; }
+                .time { color: #8b949e; display: inline-block; }
+                .step { color: #d2a8ff; margin: 0 8px; display: inline-block; }
+                .detail { color: #ff7b72; }
+                @keyframes fadeUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+                
+                /* === 移动端响应式适配 === */
+                @media (max-width: 768px) {
+                    body { padding: 15px 10px; }
+                    .card { padding: 15px; }
+                    .logs-container { padding: 15px 10px; font-size: 12px; }
+                }
+            </style></head>
+            <body>
+            <div class="card">
+                <h2>❌ 链路阻断</h2>
+                <div class="logs-container">${errorLogs}</div>
+            </div></body></html>`, { headers: { "Content-Type": "text/html; charset=utf-8" }});
+        }
+        return new Response(`解析/代理失败: ${err.message}`, { status: 500 });
+    }
+}
+
+export default { fetch(request) { return handleRequest(request); } };

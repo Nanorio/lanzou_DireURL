@@ -11,15 +11,13 @@
  * &debug= (可选) 传入 =1 开启炫酷的暗黑风全链路追踪与调试面板
  * * 👉 终端与浏览器实战用例 (基于测试链接)：
  * * 1. [ 自动提取真实文件名 ] (依赖 wget 的响应头识别)
- * wget --content-disposition "https://lanzou.nanoric.xyz/?url=https://wwarg.lanzn.com/iyJTu3mklfli"
+ * wget --content-disposition "https://你的域名/?url=蓝奏云外链地址"
  * * 2. [ 强制自定义文件名 ] (极致免参 wget，推荐用于自动化脚本)
- * wget "https://lanzou.nanoric.xyz/?url=https://wwarg.lanzn.com/iyJTu3mklfli&pwd=如有密码填这里&name=MyTestFile.zip"
+ * wget "https://你的域名/?url=蓝奏云外链地址&pwd=如有密码填这里&name=自定义文件名"
  * * 3. [ 浏览器全链路监控 ] (可视化查看真实直链、文件大小、代理流状态)
- * https://lanzou.nanoric.xyz/?url=https://wwarg.lanzn.com/iyJTu3mklfli&pwd=如有密码填这里&debug=1
+ * https://你的域名/?url=蓝奏云外链地址&pwd=如有密码填这里&debug=1
  * * =========================================================================
- * * 4. [ 真实测试站点 ]
- * https://lanzou.nanoric.xyz/?url=https://wwarg.lanzn.com/iyJTu3mklfli
- * https://lanzou.nanoric.xyz/?url=https://wwarg.lanzn.com/iyJTu3mklfli&pwd=&debug=1
+ * * 4. [ 真实测试站点 ] 此处省略
  * 
  */
 

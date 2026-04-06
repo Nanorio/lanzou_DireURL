@@ -1,24 +1,38 @@
 /**
- * ========== 阿里云ESA边缘计算-函数部署(蓝奏云代理-隐匿版V5.2)==========
+ * ========== 阿里云ESA边缘计算-函数部署 (蓝奏云代理-全能版 V5.6) ==========
  *
- * 【 终极使用说明书 (内部绝密版) 】
- * 本节点采用纯 URL 参数 (Query String) 智能解析模式，支持双轨文件命名，
- * 并自带针对直接访问的 Nginx 404 深度伪装。
- * * 👉 核心参数说明：
- * ?url=   (必填) 蓝奏云分享页完整链接
- * &pwd=   (可选) 文件的提取码/密码（无密码则不填）
- * &name=  (可选) 强行指定下载时的文件名（服务端重写 Content-Disposition）
- * &debug= (可选) 传入 =1 开启炫酷的暗黑风全链路追踪与调试面板
- * * 👉 终端与浏览器实战用例 (基于测试链接)：
- * * 1. [ 自动提取真实文件名 ] (依赖 wget 的响应头识别)
- * wget --content-disposition "https://你的域名/?url=蓝奏云外链地址"
- * * 2. [ 强制自定义文件名 ] (极致免参 wget，推荐用于自动化脚本)
- * wget "https://你的域名/?url=蓝奏云外链地址&pwd=如有密码填这里&name=自定义文件名"
- * * 3. [ 浏览器全链路监控 ] (可视化查看真实直链、文件大小、代理流状态)
- * https://你的域名/?url=蓝奏云外链地址&pwd=如有密码填这里&debug=1
- * * =========================================================================
- * * 4. [ 真实测试站点 ] 此处省略
- * 
+ * 【 终极使用说明书 】
+ * 本节点基于 Serverless 边缘架构，支持 [代理下载] 与 [极速直链] 双轨模式。
+ *
+ * 👉 核心参数说明：
+ * ?url=    (必填) 蓝奏云分享页完整链接。
+ * &pwd=    (可选) 文件的提取码/密码（无密码则不填）。
+ * &mode=   (强烈建议) 传入 redirect 开启 [极速直链] 模式。
+ * - 优点：302重定向直跳，满速下载，不消耗服务器流量。
+ * - 冲突：开启后 &debug 和 &name 参数将被忽略。
+ * &debug=  (可选) 传入 1 开启全链路追踪面板（仅在代理模式下生效）。
+ * &name=   (已废弃) 该参数已失效，系统将全自动抓取并重写蓝奏云原始文件名。
+ *
+ * ⚠️ 优先级与冲突声明：
+ * 1. 优先级：mode=redirect > debug=1 > 默认代理下载。
+ * 2. 命令行 (CLI) 下载务必使用单引号 '' 包裹 URL，防止 Shell 误解析 & 符号。
+ * 3. [重要] 代理模式下载速度受限于 ESA 节点带宽，大文件请务必使用 redirect 模式。
+ *
+ * 👉 终端 (CLI) 实战用例：
+ * 演示域名：api.example.com  演示链接：https://wwx.lanzn.com/b0123456
+ *
+ * 1. [ 极速下载模式 ] (推荐用法：不限速，不走流量，利用本地宽带直连)
+ * curl -JOL 'https://api.example.com/?url=https://wwx.lanzn.com/b0123456&mode=redirect'
+ * wget --content-disposition 'https://api.example.com/?url=https://wwx.lanzn.com/b0123456&mode=redirect'
+ *
+ * 2. [ 稳定下载模式 ] (代理流模式，ESA 节点中转数据)
+ * curl -JOL 'https://api.example.com/?url=https://wwx.lanzn.com/b0123456'
+ * wget --content-disposition 'https://api.example.com/?url=https://wwx.lanzn.com/b0123456'
+ *
+ * 3. [ 链路追踪监控 ] (可视化查看详细解析过程、文件大小与底层直链)
+ * 浏览器访问：https://api.example.com/?url=https://wwx.lanzn.com/b0123456&debug=1
+ *
+ * =========================================================================
  */
 
 function solveAliyunWaf(arg1) {
@@ -108,6 +122,7 @@ async function fetchRealStream(urlToFetch, headers, maxRedirects = 3) {
 async function handleRequest(request) {
     const url = new URL(request.url);
     const debug = url.searchParams.get("debug") === "1";
+    const mode = url.searchParams.get("mode"); // 新增 mode 参数解析
     
     // === 核心：纯享参数解析 ===
     let targetUrl = url.searchParams.get("url");
@@ -232,6 +247,15 @@ async function handleRequest(request) {
             } else throw new Error("遭遇未知格式的HTML拦截页");
         }
 
+        // === 新增：极速跳转模式逻辑 ===
+        if (mode === 'redirect') {
+            log("跳转模式", "正在 302 重定向至原始直链...");
+            return new Response(null, {
+                status: 302,
+                headers: { "Location": streamUrl, "Referrer-Policy": "no-referrer" }
+            });
+        }
+
         log("通道建立", `文件流已就绪 [Status: ${streamResp.status}]`);
 
         // === 核心逻辑：智能提取真实文件名 ===
@@ -341,7 +365,7 @@ async function handleRequest(request) {
                     </div>
                     <div class="btn-group">
                         <a href="${downloadUrl}" class="btn btn-danger" title="流量经过ESA,适合脚本与脚本关联资源的下载">⚠️ 代理下载[CLI推荐]</a>
-                        <a href="${streamUrl}" class="btn" target="_blank" title="浏览器推荐使用该方式,流量不经过ESA">🚀 直链下载[浏览器推荐]</a>
+                        <a href="${streamUrl}" class="btn" target="_blank" rel="noreferrer" title="浏览器推荐使用该方式，链接直接映射文本框直链">🚀 极速下载[浏览器推荐]</a>
                     </div>
                 </div>
 
